@@ -4,6 +4,7 @@ import sys
 import io
 import os
 import shutil
+from urllib.parse import urlparse, parse_qs
 from subprocess import Popen, PIPE
 from string import Template
 from struct import Struct
@@ -32,8 +33,8 @@ COLOR = u'#444'
 BGCOLOR = u'#333'
 JSMPEG_MAGIC = b'jsmp'
 JSMPEG_HEADER = Struct('>4sHH')
-VFLIP = False
-HFLIP = False
+VFLIP = True
+HFLIP = True
 
 ###########################################
 
@@ -43,20 +44,27 @@ class StreamingHttpHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
-        if self.path == '/':
+        o = urlparse(self.path)
+        path = o.path
+        query = parse_qs(o.query)
+        if path == '/':
             self.send_response(301)
             self.send_header('Location', '/index.html')
             self.end_headers()
             return
-        elif self.path == '/jsmpg.js':
+        elif path == '/jsmpg.js':
             content_type = 'application/javascript'
             content = self.server.jsmpg_content
-        elif self.path == '/index.html':
+        elif path == '/index.html':
             content_type = 'text/html; charset=utf-8'
             tpl = Template(self.server.index_template)
             content = tpl.safe_substitute(dict(
                 WS_PORT=WS_PORT, WIDTH=WIDTH, HEIGHT=HEIGHT, COLOR=COLOR,
                 BGCOLOR=BGCOLOR))
+        elif path == '/camera-settings':
+            content_type = 'text/html'
+            content = 'works'
+            self.server.camera.iso = int((query.get('iso')[0]))
         else:
             self.send_error(404, 'File not found')
             return
@@ -71,9 +79,10 @@ class StreamingHttpHandler(BaseHTTPRequestHandler):
 
 
 class StreamingHttpServer(HTTPServer):
-    def __init__(self):
+    def __init__(self, camera):
         super(StreamingHttpServer, self).__init__(
                 ('', HTTP_PORT), StreamingHttpHandler)
+        self.camera = camera
         with io.open('index.html', 'r') as f:
             self.index_template = f.read()
         with io.open('jsmpg.js', 'r') as f:
@@ -116,13 +125,19 @@ class BroadcastThread(Thread):
         super(BroadcastThread, self).__init__()
         self.converter = converter
         self.websocket_server = websocket_server
+        self.counter = 0
 
     def run(self):
         try:
             while True:
                 buf = self.converter.stdout.read1(32768)
                 if buf:
+                    self.counter = self.counter + 1
                     self.websocket_server.manager.broadcast(buf, binary=True)
+                    if self.counter > 30:
+                        mill = int(round(time() * 1000))
+                        self.counter = 0
+                        self.websocket_server.manager.broadcast(str(mill), binary=False)
                 elif self.converter.poll() is not None:
                     break
         finally:
@@ -147,7 +162,7 @@ def main():
         websocket_server.initialize_websockets_manager()
         websocket_thread = Thread(target=websocket_server.serve_forever)
         print('Initializing HTTP server on port %d' % HTTP_PORT)
-        http_server = StreamingHttpServer()
+        http_server = StreamingHttpServer(camera)
         http_thread = Thread(target=http_server.serve_forever)
         print('Initializing broadcast thread')
         output = BroadcastOutput(camera)
